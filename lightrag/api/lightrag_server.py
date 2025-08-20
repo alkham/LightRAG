@@ -2,7 +2,7 @@
 LightRAG FastAPI Server
 """
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request, APIRouter
 import asyncio
 import os
 import logging
@@ -40,13 +40,13 @@ from lightrag.constants import (
     DEFAULT_LOG_FILENAME,
 )
 from lightrag.api.routers.document_routes import (
-    DocumentManager,
     create_document_routes,
-    run_scanning_process,
 )
 from lightrag.api.routers.query_routes import create_query_routes
 from lightrag.api.routers.graph_routes import create_graph_routes
 from lightrag.api.routers.ollama_api import OllamaAPI
+from lightrag.api.dependencies import rag_instances, instance_lock, get_rag_instance
+
 
 from lightrag.utils import logger, set_verbose_debug
 from lightrag.kg.shared_storage import (
@@ -579,7 +579,9 @@ def create_app(args):
 
         # Regular user login
         user_token = auth_handler.create_token(
-            username=username, role="user", metadata={"auth_mode": "enabled"}
+            username=username,
+            role="user",
+            metadata={"auth_mode": "enabled", "workspace": username},
         )
         return {
             "access_token": user_token,

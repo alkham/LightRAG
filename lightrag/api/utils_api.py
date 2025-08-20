@@ -91,56 +91,65 @@ def get_combined_auth_dependency(api_key: Optional[str] = None):
         api_key_header_value: Optional[str] = None
         if api_key_header is None
         else Security(api_key_header),
-    ):
+    ) -> dict:
         # 1. Check if path is in whitelist
         path = request.url.path
         for pattern, is_prefix in whitelist_patterns:
             if (is_prefix and path.startswith(pattern)) or (
                 not is_prefix and path == pattern
             ):
-                return  # Whitelist path, allow access
+                # For whitelisted paths, act as if no auth is configured
+                return {"username": "guest", "role": "guest", "workspace": "default"}
 
-        # 2. Validate token first if provided in the request (Ensure 401 error if token is invalid)
+        # 2. Validate token first if provided in the request
         if token:
             try:
                 token_info = auth_handler.validate_token(token)
+                # Ensure workspace is in the token for non-guest users when auth is on
+                if auth_configured and token_info.get("role") != "guest":
+                    if "workspace" not in token_info.get("metadata", {}):
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid token: workspace missing.",
+                        )
+                    token_info["workspace"] = token_info["metadata"]["workspace"]
+                    return token_info
                 # Accept guest token if no auth is configured
                 if not auth_configured and token_info.get("role") == "guest":
-                    return
-                # Accept non-guest token if auth is configured
-                if auth_configured and token_info.get("role") != "guest":
-                    return
+                    token_info["workspace"] = "default"
+                    return token_info
 
-                # Token validation failed, immediately return 401 error
+                # Token is present but not valid for the current auth configuration
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid token. Please login again.",
+                    detail="Invalid token for current authentication mode.",
                 )
             except HTTPException as e:
-                # If already a 401 error, re-raise it
-                if e.status_code == status.HTTP_401_UNAUTHORIZED:
-                    raise
-                # For other exceptions, continue processing
+                raise e  # Re-raise exceptions from validate_token or our own logic
 
-        # 3. Acept all request if no API protection needed
+        # 3. Handle cases where no token is provided
+        # If no auth is configured at all, allow access as a guest
         if not auth_configured and not api_key_configured:
-            return
+            return {"username": "guest", "role": "guest", "workspace": "default"}
 
-        # 4. Validate API key if provided and API-Key authentication is configured
+        # 4. Validate API key if provided
         if (
             api_key_configured
             and api_key_header_value
             and api_key_header_value == api_key
         ):
-            return  # API key validation successful
+            # API key provides access, let's assume to a default/admin workspace.
+            # This could be configured further if needed.
+            return {"username": "api_key_user", "role": "admin", "workspace": "default"}
 
         ### Authentication failed ####
+        # If we reach here, it means no valid auth method was provided.
 
-        # if password authentication is configured but not provided, ensure 401 error if auth_configured
+        # If auth is configured but no token was given
         if auth_configured and not token:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="No credentials provided. Please login.",
+                detail="Not authenticated. Please login.",
             )
 
         # if api key is provided but validation failed

@@ -7,8 +7,10 @@ import traceback
 from fastapi import APIRouter, Depends, Query, HTTPException
 from pydantic import BaseModel
 
+from lightrag import LightRAG
 from lightrag.utils import logger
 from ..utils_api import get_combined_auth_dependency
+from ..dependencies import get_rag_instance
 
 router = APIRouter(tags=["graph"])
 

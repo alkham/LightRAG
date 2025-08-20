@@ -89,3 +89,49 @@ The proposed architecture decouples the application into four main layers, each 
 5.  The worker reads the file, extracts text, and for each chunk, calls the **LLM Inference Server** to extract knowledge.
 6.  The worker writes the chunks, embeddings, entities, and relationships to the **Qdrant**, **Neo4j**, and **MongoDB/PostgreSQL** databases.
 7.  The worker updates the document's status in the database to `PROCESSED`.
+
+---
+
+## Core Architecture Refactoring: Per-User Workspaces
+
+The application has been refactored from a single, global `LightRAG` instance to a multi-tenant architecture that provides data isolation for each authenticated user.
+
+-   **Workspace per User**: Each user is automatically assigned a unique workspace, identified by their username.
+-   **Token-based Workspace**: The user's workspace is embedded in their JWT token upon login.
+-   **Dependency Injection**: On every API request, a FastAPI dependency validates the user's token, extracts their workspace, and provides a `LightRAG` instance that is scoped to that specific workspace. This ensures that all operations (document uploads, queries, etc.) are performed only on that user's data.
+-   **Instance Caching**: `LightRAG` instances are cached in memory to avoid the overhead of re-initialization on every request for the same user.
+
+---
+
+## Running the Multi-Process Ingestion System
+
+To support the scalable, multi-process architecture, a Redis message broker and Celery workers must be running alongside the main web server.
+
+### New Dependencies
+The following Python packages have been added and are required to run the worker pool:
+- `celery`
+- `redis`
+
+You can install them with pip:
+```bash
+pip install celery redis
+```
+
+### 1. Start the Redis Broker
+Redis is used as the message broker to queue ingestion tasks. You can easily start a Redis instance using Docker:
+```bash
+docker run -d -p 6379:6379 redis
+```
+
+### 2. Start the Celery Workers
+The Celery workers are the processes that will listen for and execute the document ingestion tasks. To start a worker pool, run the following command from the root of the repository:
+
+```bash
+celery -A lightrag.api.celery_app.celery_app worker --loglevel=info
+```
+
+*   `-A lightrag.api.celery_app.celery_app`: Points the celery command to your Celery application instance.
+*   `worker`: Specifies that you are starting a worker process.
+*   `--loglevel=info`: Sets the logging level for the worker.
+
+You can run multiple workers on the same or different machines to scale up processing capacity. The tasks sent from the API server will be automatically distributed among the available workers by the Redis broker.

@@ -11,6 +11,7 @@ import pipmaster as pm
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Literal
+import status
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -26,6 +27,8 @@ from lightrag.base import DeletionResult, DocProcessingStatus, DocStatus
 from lightrag.utils import generate_track_id
 from lightrag.api.utils_api import get_combined_auth_dependency
 from ..config import global_args
+from ..dependencies import get_rag_instance, get_doc_manager_instance
+from ..celery_app import process_document_task
 
 
 # Function to format datetime to ISO format string with timezone information
@@ -1569,28 +1572,14 @@ def create_document_routes(
         "/upload", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
     )
     async def upload_to_input_dir(
-        background_tasks: BackgroundTasks, file: UploadFile = File(...)
+        file: UploadFile = File(...),
+        rag: LightRAG = Depends(get_rag_instance),
+        doc_manager: DocumentManager = Depends(get_doc_manager_instance),
     ):
         """
-        Upload a file to the input directory and index it.
-
-        This API endpoint accepts a file through an HTTP POST request, checks if the
-        uploaded file is of a supported type, saves it in the specified input directory,
-        indexes it for retrieval, and returns a success status with relevant details.
-
-        Args:
-            background_tasks: FastAPI BackgroundTasks for async processing
-            file (UploadFile): The file to be uploaded. It must have an allowed extension.
-
-        Returns:
-            InsertResponse: A response object containing the upload status and a message.
-                status can be "success", "duplicated", or error is thrown.
-
-        Raises:
-            HTTPException: If the file type is not supported (400) or other errors occur (500).
+        Upload a file to the input directory and queue it for indexing by a worker.
         """
         try:
-            # Sanitize filename to prevent Path Traversal attacks
             safe_filename = sanitize_filename(file.filename, doc_manager.input_dir)
 
             if not doc_manager.is_supported_file(safe_filename):
@@ -1600,7 +1589,6 @@ def create_document_routes(
                 )
 
             file_path = doc_manager.input_dir / safe_filename
-            # Check if file already exists
             if file_path.exists():
                 return InsertResponse(
                     status="duplicated",
@@ -1613,12 +1601,16 @@ def create_document_routes(
 
             track_id = generate_track_id("upload")
 
-            # Add to background tasks and get track_id
-            background_tasks.add_task(pipeline_index_file, rag, file_path, track_id)
+            # Instead of using BackgroundTasks, we now use Celery to queue the job
+            process_document_task.delay(
+                workspace=rag.workspace,
+                file_path_str=str(file_path),
+                track_id=track_id,
+            )
 
             return InsertResponse(
                 status="success",
-                message=f"File '{safe_filename}' uploaded successfully. Processing will continue in background.",
+                message=f"File '{safe_filename}' successfully queued for processing.",
                 track_id=track_id,
             )
 
@@ -1631,39 +1623,21 @@ def create_document_routes(
         "/text", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
     )
     async def insert_text(
-        request: InsertTextRequest, background_tasks: BackgroundTasks
+        request: InsertTextRequest,
+        rag: LightRAG = Depends(get_rag_instance),
     ):
         """
         Insert text into the RAG system.
-
-        This endpoint allows you to insert text data into the RAG system for later retrieval
-        and use in generating responses.
-
-        Args:
-            request (InsertTextRequest): The request body containing the text to be inserted.
-            background_tasks: FastAPI BackgroundTasks for async processing
-
-        Returns:
-            InsertResponse: A response object containing the status of the operation.
-
-        Raises:
-            HTTPException: If an error occurs during text processing (500).
         """
         try:
-            # Generate track_id for text insertion
-            track_id = generate_track_id("insert")
-
-            background_tasks.add_task(
-                pipeline_index_texts,
-                rag,
-                [request.text],
-                file_sources=[request.file_source],
-                track_id=track_id,
+            # In a fully-fledged Celery implementation, this would also be a task.
+            # For now, we process it synchronously within the API request.
+            track_id = await rag.ainsert(
+                [request.text], file_paths=[request.file_source]
             )
-
             return InsertResponse(
                 status="success",
-                message="Text successfully received. Processing will continue in background.",
+                message="Text successfully received and processed.",
                 track_id=track_id,
             )
         except Exception as e:
@@ -1677,39 +1651,20 @@ def create_document_routes(
         dependencies=[Depends(combined_auth)],
     )
     async def insert_texts(
-        request: InsertTextsRequest, background_tasks: BackgroundTasks
+        request: InsertTextsRequest,
+        rag: LightRAG = Depends(get_rag_instance),
     ):
         """
         Insert multiple texts into the RAG system.
-
-        This endpoint allows you to insert multiple text entries into the RAG system
-        in a single request.
-
-        Args:
-            request (InsertTextsRequest): The request body containing the list of texts.
-            background_tasks: FastAPI BackgroundTasks for async processing
-
-        Returns:
-            InsertResponse: A response object containing the status of the operation.
-
-        Raises:
-            HTTPException: If an error occurs during text processing (500).
         """
         try:
-            # Generate track_id for texts insertion
-            track_id = generate_track_id("insert")
-
-            background_tasks.add_task(
-                pipeline_index_texts,
-                rag,
-                request.texts,
-                file_sources=request.file_sources,
-                track_id=track_id,
+            # In a fully-fledged Celery implementation, this would also be a task.
+            track_id = await rag.ainsert(
+                request.texts, file_paths=request.file_sources
             )
-
             return InsertResponse(
                 status="success",
-                message="Texts successfully received. Processing will continue in background.",
+                message="Texts successfully received and processed.",
                 track_id=track_id,
             )
         except Exception as e:
