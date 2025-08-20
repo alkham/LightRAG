@@ -56,7 +56,7 @@ from lightrag.kg.shared_storage import (
     cleanup_keyed_lock,
     finalize_share_data,
 )
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from lightrag.api.auth import auth_handler
 
 # use the .env that is inside the current folder
@@ -140,8 +140,123 @@ def create_app(args):
     # Check if API key is provided either through env var or args
     api_key = os.getenv("LIGHTRAG_API_KEY") or args.key
 
-    # Initialize document manager with workspace support for data isolation
-    doc_manager = DocumentManager(args.input_dir, workspace=args.workspace)
+    # ------------------------------------------------------------------
+    # Workspace aware dependencies
+    # ------------------------------------------------------------------
+    rag_cache: dict[str, LightRAG] = {}
+    doc_manager_cache: dict[str, DocumentManager] = {}
+
+    oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
+
+    async def get_current_workspace(token: str = Depends(oauth2_scheme)) -> str:
+        """Derive workspace name from authenticated user."""
+        if token:
+            try:
+                token_info = auth_handler.validate_token(token)
+                return token_info["username"]
+            except HTTPException:
+                pass
+        return args.workspace or ""
+
+    async def create_rag_instance(workspace: str) -> LightRAG:
+        if workspace in rag_cache:
+            return rag_cache[workspace]
+
+        if args.llm_binding in ["lollms", "ollama", "openai", "aws_bedrock"]:
+            rag = LightRAG(
+                working_dir=args.working_dir,
+                workspace=workspace,
+                llm_model_func=(
+                    lollms_model_complete
+                    if args.llm_binding == "lollms"
+                    else (
+                        ollama_model_complete
+                        if args.llm_binding == "ollama"
+                        else bedrock_model_complete
+                        if args.llm_binding == "aws_bedrock"
+                        else openai_alike_model_complete
+                    )
+                ),
+                llm_model_name=args.llm_model,
+                llm_model_max_async=args.max_async,
+                summary_max_tokens=args.max_tokens,
+                chunk_token_size=int(args.chunk_size),
+                chunk_overlap_token_size=int(args.chunk_overlap_size),
+                llm_model_kwargs=(
+                    {
+                        "host": args.llm_binding_host,
+                        "timeout": args.timeout,
+                        "options": OllamaLLMOptions.options_dict(args),
+                        "api_key": args.llm_binding_api_key,
+                    }
+                    if args.llm_binding == "lollms" or args.llm_binding == "ollama"
+                    else {}
+                ),
+                embedding_func=embedding_func,
+                kv_storage=args.kv_storage,
+                graph_storage=args.graph_storage,
+                vector_storage=args.vector_storage,
+                doc_status_storage=args.doc_status_storage,
+                vector_db_storage_cls_kwargs={
+                    "cosine_better_than_threshold": args.cosine_threshold
+                },
+                enable_llm_cache_for_entity_extract=args.enable_llm_cache_for_extract,
+                enable_llm_cache=args.enable_llm_cache,
+                rerank_model_func=rerank_model_func,
+                max_parallel_insert=args.max_parallel_insert,
+                max_graph_nodes=args.max_graph_nodes,
+                addon_params={"language": args.summary_language},
+                ollama_server_infos=ollama_server_infos,
+            )
+        else:  # azure_openai
+            rag = LightRAG(
+                working_dir=args.working_dir,
+                workspace=workspace,
+                llm_model_func=azure_openai_model_complete,
+                chunk_token_size=int(args.chunk_size),
+                chunk_overlap_token_size=int(args.chunk_overlap_size),
+                llm_model_kwargs={
+                    "timeout": args.timeout,
+                },
+                llm_model_name=args.llm_model,
+                llm_model_max_async=args.max_async,
+                summary_max_tokens=args.max_tokens,
+                embedding_func=embedding_func,
+                kv_storage=args.kv_storage,
+                graph_storage=args.graph_storage,
+                vector_storage=args.vector_storage,
+                doc_status_storage=args.doc_status_storage,
+                vector_db_storage_cls_kwargs={
+                    "cosine_better_than_threshold": args.cosine_threshold
+                },
+                enable_llm_cache_for_entity_extract=args.enable_llm_cache_for_extract,
+                enable_llm_cache=args.enable_llm_cache,
+                rerank_model_func=rerank_model_func,
+                max_parallel_insert=args.max_parallel_insert,
+                max_graph_nodes=args.max_graph_nodes,
+                addon_params={"language": args.summary_language},
+                ollama_server_infos=ollama_server_infos,
+            )
+
+        await rag.initialize_storages()
+        await rag.check_and_migrate_data()
+        rag_cache[workspace] = rag
+        return rag
+
+    def create_doc_manager_instance(workspace: str) -> DocumentManager:
+        if workspace in doc_manager_cache:
+            return doc_manager_cache[workspace]
+        manager = DocumentManager(args.input_dir, workspace=workspace)
+        doc_manager_cache[workspace] = manager
+        return manager
+
+    async def get_rag(workspace: str = Depends(get_current_workspace)) -> LightRAG:
+        return await create_rag_instance(workspace)
+
+    def get_doc_manager(
+        workspace: str = Depends(get_current_workspace),
+    ) -> DocumentManager:
+        return create_doc_manager_instance(workspace)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -150,12 +265,11 @@ def create_app(args):
         app.state.background_tasks = set()
 
         try:
-            # Initialize database connections
-            await rag.initialize_storages()
             await initialize_pipeline_status()
 
-            # Data migration regardless of storage implementation
-            await rag.check_and_migrate_data()
+            default_workspace = args.workspace or ""
+            rag = await create_rag_instance(default_workspace)
+            doc_manager = create_doc_manager_instance(default_workspace)
 
             pipeline_status = await get_namespace_data("pipeline_status")
 
@@ -173,15 +287,17 @@ def create_app(args):
                 task = asyncio.create_task(run_scanning_process(rag, doc_manager))
                 app.state.background_tasks.add(task)
                 task.add_done_callback(app.state.background_tasks.discard)
-                logger.info(f"Process {os.getpid()} auto scan task started at startup.")
+                logger.info(
+                    f"Process {os.getpid()} auto scan task started at startup."
+                )
 
             ASCIIColors.green("\nServer is ready to accept connections! 🚀\n")
 
             yield
 
         finally:
-            # Clean up database connections
-            await rag.finalize_storages()
+            for instance in rag_cache.values():
+                await instance.finalize_storages()
 
             # Clean up shared data
             finalize_share_data()
@@ -427,96 +543,14 @@ def create_app(args):
         name=args.simulated_model_name, tag=args.simulated_model_tag
     )
 
-    # Initialize RAG
-    if args.llm_binding in ["lollms", "ollama", "openai", "aws_bedrock"]:
-        rag = LightRAG(
-            working_dir=args.working_dir,
-            workspace=args.workspace,
-            llm_model_func=(
-                lollms_model_complete
-                if args.llm_binding == "lollms"
-                else (
-                    ollama_model_complete
-                    if args.llm_binding == "ollama"
-                    else bedrock_model_complete
-                    if args.llm_binding == "aws_bedrock"
-                    else openai_alike_model_complete
-                )
-            ),
-            llm_model_name=args.llm_model,
-            llm_model_max_async=args.max_async,
-            summary_max_tokens=args.max_tokens,
-            chunk_token_size=int(args.chunk_size),
-            chunk_overlap_token_size=int(args.chunk_overlap_size),
-            llm_model_kwargs=(
-                {
-                    "host": args.llm_binding_host,
-                    "timeout": args.timeout,
-                    "options": OllamaLLMOptions.options_dict(args),
-                    "api_key": args.llm_binding_api_key,
-                }
-                if args.llm_binding == "lollms" or args.llm_binding == "ollama"
-                else {}
-            ),
-            embedding_func=embedding_func,
-            kv_storage=args.kv_storage,
-            graph_storage=args.graph_storage,
-            vector_storage=args.vector_storage,
-            doc_status_storage=args.doc_status_storage,
-            vector_db_storage_cls_kwargs={
-                "cosine_better_than_threshold": args.cosine_threshold
-            },
-            enable_llm_cache_for_entity_extract=args.enable_llm_cache_for_extract,
-            enable_llm_cache=args.enable_llm_cache,
-            rerank_model_func=rerank_model_func,
-            max_parallel_insert=args.max_parallel_insert,
-            max_graph_nodes=args.max_graph_nodes,
-            addon_params={"language": args.summary_language},
-            ollama_server_infos=ollama_server_infos,
-        )
-    else:  # azure_openai
-        rag = LightRAG(
-            working_dir=args.working_dir,
-            workspace=args.workspace,
-            llm_model_func=azure_openai_model_complete,
-            chunk_token_size=int(args.chunk_size),
-            chunk_overlap_token_size=int(args.chunk_overlap_size),
-            llm_model_kwargs={
-                "timeout": args.timeout,
-            },
-            llm_model_name=args.llm_model,
-            llm_model_max_async=args.max_async,
-            summary_max_tokens=args.max_tokens,
-            embedding_func=embedding_func,
-            kv_storage=args.kv_storage,
-            graph_storage=args.graph_storage,
-            vector_storage=args.vector_storage,
-            doc_status_storage=args.doc_status_storage,
-            vector_db_storage_cls_kwargs={
-                "cosine_better_than_threshold": args.cosine_threshold
-            },
-            enable_llm_cache_for_entity_extract=args.enable_llm_cache_for_extract,
-            enable_llm_cache=args.enable_llm_cache,
-            rerank_model_func=rerank_model_func,
-            max_parallel_insert=args.max_parallel_insert,
-            max_graph_nodes=args.max_graph_nodes,
-            addon_params={"language": args.summary_language},
-            ollama_server_infos=ollama_server_infos,
-        )
+    # Add routes using workspace-aware dependencies
+    app.include_router(create_document_routes(get_rag, get_doc_manager, api_key))
+    app.include_router(create_query_routes(get_rag, api_key, args.top_k))
+    app.include_router(create_graph_routes(get_rag, api_key))
 
-    # Add routes
-    app.include_router(
-        create_document_routes(
-            rag,
-            doc_manager,
-            api_key,
-        )
-    )
-    app.include_router(create_query_routes(rag, api_key, args.top_k))
-    app.include_router(create_graph_routes(rag, api_key))
-
-    # Add Ollama API routes
-    ollama_api = OllamaAPI(rag, top_k=args.top_k, api_key=api_key)
+    # Add Ollama API routes (default workspace)
+    default_rag = asyncio.run(create_rag_instance(args.workspace or ""))
+    ollama_api = OllamaAPI(default_rag, top_k=args.top_k, api_key=api_key)
     app.include_router(ollama_api.router, prefix="/api")
 
     @app.get("/")

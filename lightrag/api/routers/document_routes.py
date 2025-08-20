@@ -1535,7 +1535,9 @@ async def background_delete_documents(
 
 
 def create_document_routes(
-    rag: LightRAG, doc_manager: DocumentManager, api_key: Optional[str] = None
+    rag_getter,
+    doc_manager_getter,
+    api_key: Optional[str] = None,
 ):
     # Create combined auth dependency for document routes
     combined_auth = get_combined_auth_dependency(api_key)
@@ -1543,7 +1545,11 @@ def create_document_routes(
     @router.post(
         "/scan", response_model=ScanResponse, dependencies=[Depends(combined_auth)]
     )
-    async def scan_for_new_documents(background_tasks: BackgroundTasks):
+    async def scan_for_new_documents(
+        background_tasks: BackgroundTasks,
+        rag: LightRAG = Depends(rag_getter),
+        doc_manager: DocumentManager = Depends(doc_manager_getter),
+    ):
         """
         Trigger the scanning process for new documents.
 
@@ -1569,7 +1575,10 @@ def create_document_routes(
         "/upload", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
     )
     async def upload_to_input_dir(
-        background_tasks: BackgroundTasks, file: UploadFile = File(...)
+        background_tasks: BackgroundTasks,
+        file: UploadFile = File(...),
+        rag: LightRAG = Depends(rag_getter),
+        doc_manager: DocumentManager = Depends(doc_manager_getter),
     ):
         """
         Upload a file to the input directory and index it.
@@ -1631,7 +1640,9 @@ def create_document_routes(
         "/text", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
     )
     async def insert_text(
-        request: InsertTextRequest, background_tasks: BackgroundTasks
+        request: InsertTextRequest,
+        background_tasks: BackgroundTasks,
+        rag: LightRAG = Depends(rag_getter),
     ):
         """
         Insert text into the RAG system.
@@ -1677,7 +1688,9 @@ def create_document_routes(
         dependencies=[Depends(combined_auth)],
     )
     async def insert_texts(
-        request: InsertTextsRequest, background_tasks: BackgroundTasks
+        request: InsertTextsRequest,
+        background_tasks: BackgroundTasks,
+        rag: LightRAG = Depends(rag_getter),
     ):
         """
         Insert multiple texts into the RAG system.
@@ -1720,7 +1733,10 @@ def create_document_routes(
     @router.delete(
         "", response_model=ClearDocumentsResponse, dependencies=[Depends(combined_auth)]
     )
-    async def clear_documents():
+    async def clear_documents(
+        rag: LightRAG = Depends(rag_getter),
+        doc_manager: DocumentManager = Depends(doc_manager_getter),
+    ):
         """
         Clear all documents from the RAG system.
 
@@ -1980,7 +1996,9 @@ def create_document_routes(
     @router.get(
         "", response_model=DocsStatusesResponse, dependencies=[Depends(combined_auth)]
     )
-    async def documents() -> DocsStatusesResponse:
+    async def documents(
+        rag: LightRAG = Depends(rag_getter),
+    ) -> DocsStatusesResponse:
         """
         Get the status of all documents in the system.
 
@@ -2052,6 +2070,8 @@ def create_document_routes(
     async def delete_document(
         delete_request: DeleteDocRequest,
         background_tasks: BackgroundTasks,
+        rag: LightRAG = Depends(rag_getter),
+        doc_manager: DocumentManager = Depends(doc_manager_getter),
     ) -> DeleteDocByIdResponse:
         """
         Delete documents and all their associated data by their IDs using background processing.
@@ -2127,7 +2147,10 @@ def create_document_routes(
         response_model=ClearCacheResponse,
         dependencies=[Depends(combined_auth)],
     )
-    async def clear_cache(request: ClearCacheRequest):
+    async def clear_cache(
+        request: ClearCacheRequest,
+        rag: LightRAG = Depends(rag_getter),
+    ):
         """
         Clear all cache data from the LLM response cache storage.
 
@@ -2161,7 +2184,10 @@ def create_document_routes(
         response_model=DeletionResult,
         dependencies=[Depends(combined_auth)],
     )
-    async def delete_entity(request: DeleteEntityRequest):
+    async def delete_entity(
+        request: DeleteEntityRequest,
+        rag: LightRAG = Depends(rag_getter),
+    ):
         """
         Delete an entity and all its relationships from the knowledge graph.
 
@@ -2196,7 +2222,10 @@ def create_document_routes(
         response_model=DeletionResult,
         dependencies=[Depends(combined_auth)],
     )
-    async def delete_relation(request: DeleteRelationRequest):
+    async def delete_relation(
+        request: DeleteRelationRequest,
+        rag: LightRAG = Depends(rag_getter),
+    ):
         """
         Delete a relationship between two entities from the knowledge graph.
 
@@ -2234,7 +2263,10 @@ def create_document_routes(
         response_model=TrackStatusResponse,
         dependencies=[Depends(combined_auth)],
     )
-    async def get_track_status(track_id: str) -> TrackStatusResponse:
+    async def get_track_status(
+        track_id: str,
+        rag: LightRAG = Depends(rag_getter),
+    ) -> TrackStatusResponse:
         """
         Get the processing status of documents by tracking ID.
 
@@ -2310,6 +2342,7 @@ def create_document_routes(
     )
     async def get_documents_paginated(
         request: DocumentsRequest,
+        rag: LightRAG = Depends(rag_getter),
     ) -> PaginatedDocsResponse:
         """
         Get documents with pagination support.
@@ -2395,7 +2428,9 @@ def create_document_routes(
         response_model=StatusCountsResponse,
         dependencies=[Depends(combined_auth)],
     )
-    async def get_document_status_counts() -> StatusCountsResponse:
+    async def get_document_status_counts(
+        rag: LightRAG = Depends(rag_getter),
+    ) -> StatusCountsResponse:
         """
         Get counts of documents by status.
 
